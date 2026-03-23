@@ -65,7 +65,7 @@ fn xml_feature(
     }
 
     txt.push_str(&format!(
-        "{}<feature name=\"{}\"{}{}{}  value=\"{}\" description=\"{}\"{}>\n",
+        "{}<feature name=\"{}\"{}{}{} value=\"{}\" description=\"{}\"{}>\n",
         spaces,
         xml::escape(&info.prompt),
         submenu_str,

@@ -14,8 +14,10 @@ pub fn find_all(features: &IndexMap<String, EmulatorFeatures>) -> IndexMap<Strin
     let mut to_translate: IndexMap<String, Vec<TranslationComment>> = IndexMap::new();
 
     for (emulator, emu_data) in features {
-        // Cores
+        // Cores — track last core name to replicate Python's stale variable leak
+        let mut last_core: Option<&str> = None;
         for (core_name, core_data) in &emu_data.cores {
+            last_core = Some(core_name.as_str());
             // Core cfeatures
             extract_cfeatures(&core_data.cfeatures, emulator, Some(core_name), &mut to_translate);
 
@@ -26,10 +28,9 @@ pub fn find_all(features: &IndexMap<String, EmulatorFeatures>) -> IndexMap<Strin
         }
 
         // Emulator-level systems
+        // Python bug: uses stale `core` variable from the cores loop above
         for (_sys_name, sys_data) in &emu_data.systems {
-            // Note: Python uses `core` variable from the outer loop which is stale here.
-            // We pass None for core at emulator-level systems.
-            extract_cfeatures(&sys_data.cfeatures, emulator, None, &mut to_translate);
+            extract_cfeatures(&sys_data.cfeatures, emulator, last_core, &mut to_translate);
         }
 
         // Emulator-level cfeatures
@@ -118,7 +119,7 @@ pub fn write_header(
 ) {
     let skip_patterns = build_skip_patterns();
     let mut out = String::new();
-    out.push_str("// file generated automatically by es-system, don't modify it\n\n");
+    out.push_str("// file generated automatically by es-system.py, don't modify it\n\n");
 
     let mut n = 1;
     for (text, comments) in to_translate {
@@ -182,7 +183,7 @@ pub fn write_keys_header(path: &Path, keys_parent_folder: &Path) {
     }
 
     let mut out = String::new();
-    out.push_str("// file generated automatically by es-system, don't modify it\n\n");
+    out.push_str("// file generated automatically by es-system.py, don't modify it\n\n");
 
     let mut n = 0;
     for (text, sources) in &vals {

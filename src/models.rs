@@ -116,25 +116,39 @@ pub struct SystemDefault {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Convert a serde_yaml::Value to a display string matching Python's str() behavior.
+///
+/// IMPORTANT: serde_yaml (libyaml) follows YAML 1.1 spec which treats
+/// yes/no/on/off/true/false/True/False as booleans. Python's PyYAML does the same,
+/// so str(True) = "True", str(False) = "False". Similarly, YAML 1.1 sexagesimal
+/// notation means 4:3 → 243 (4*60+3). We match Python/PyYAML output exactly.
 pub fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
     match v {
         serde_yaml::Value::String(s) => s.clone(),
         serde_yaml::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
+            let s = format!("{}", n);
+            if s.contains('.') || (n.as_f64().is_some() && n.as_i64().is_none()) {
+                if let Some(f) = n.as_f64() {
+                    if f.fract() == 0.0 {
+                        format!("{:.1}", f)
+                    } else {
+                        format!("{}", f)
+                    }
+                } else {
+                    s
+                }
+            } else if let Some(i) = n.as_i64() {
                 i.to_string()
             } else if let Some(f) = n.as_f64() {
-                // Match Python's str(float) output
-                let s = format!("{}", f);
-                s
+                format!("{}", f)
             } else {
-                n.to_string()
+                s
             }
         }
         serde_yaml::Value::Bool(b) => {
             // Python str(True) = "True", str(False) = "False"
             if *b { "True".to_string() } else { "False".to_string() }
         }
-        serde_yaml::Value::Null => String::new(),
+        serde_yaml::Value::Null => "None".to_string(),
         _ => format!("{:?}", v),
     }
 }
