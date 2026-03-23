@@ -1,0 +1,24 @@
+[package]
+name = "es-system"
+version = "2.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "EmulationStation system/features config generator for REG-Linux"
+repository = "https://github.com/REG-Linux/es-system"
+
+[[bin]]
+name = "es-system"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+glob = "0.3"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
