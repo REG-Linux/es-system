@@ -1,5 +1,6 @@
 mod config;
 mod generate_features;
+mod generate_json;
 mod generate_systems;
 mod models;
 mod requirements;
@@ -16,25 +17,59 @@ use indexmap::IndexMap;
 
 use models::{EmulatorFeatures, System, SystemDefault};
 
+#[derive(Clone, Copy, PartialEq)]
+enum OutputFormat {
+    Xml,
+    Json,
+}
+
+fn parse_format(args: &[String]) -> (OutputFormat, Vec<String>) {
+    let mut format = OutputFormat::Xml;
+    let mut filtered = Vec::new();
+    let mut skip_next = false;
+
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--format" {
+            if let Some(val) = args.get(i + 1) {
+                match val.as_str() {
+                    "json" => format = OutputFormat::Json,
+                    "xml" => format = OutputFormat::Xml,
+                    _ => {
+                        eprintln!("Unknown format: {} (expected: xml, json)", val);
+                        process::exit(1);
+                    }
+                }
+                skip_next = true;
+            }
+        } else {
+            filtered.push(arg.clone());
+        }
+    }
+
+    (format, filtered)
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
+    let (format, args) = parse_format(&raw_args);
 
     if args.len() > 1 && args[1] == "regenerate" {
-        regenerate_mode(&args[2..]);
+        regenerate_mode(&args[2..], format);
         return;
     }
 
     // Legacy positional args mode (compatible with Python es-system.py invocation)
-    // Args: yml features es_translations es_keys_translations es_keys_parent_folder
-    //       blacklisted_words config es_systems es_features
-    //       gen_defaults_global gen_defaults_arch romsdirsource romsdirtarget arch
     if args.len() < 15 {
-        eprintln!("Usage: {} <yml> <features> <es_translations> <es_keys_translations> \\", args[0]);
+        eprintln!("Usage: {} [--format xml|json] <yml> <features> <es_translations> <es_keys_translations> \\", args[0]);
         eprintln!("         <keys_parent_folder> <blacklisted_words> <config> \\");
         eprintln!("         <es_systems> <es_features> <gen_defaults_global> \\");
         eprintln!("         <gen_defaults_arch> <romsdirsource> <romsdirtarget> <arch>");
         eprintln!();
-        eprintln!("Or: {} regenerate [--data-dir DIR] [--output-dir DIR] [--arch ARCH]", args[0]);
+        eprintln!("Or: {} [--format xml|json] regenerate [--data-dir DIR] [--output-dir DIR] [--arch ARCH]", args[0]);
         process::exit(1);
     }
 
@@ -68,6 +103,7 @@ fn main() {
         &roms_dir_source,
         &roms_dir_target,
         arch,
+        format,
     );
 }
 
@@ -86,6 +122,7 @@ fn generate_all(
     roms_dir_source: &Path,
     roms_dir_target: &Path,
     arch: &str,
+    format: OutputFormat,
 ) {
     // Load inputs
     let systems: IndexMap<String, System> = load_yaml(yml_path);
@@ -95,19 +132,34 @@ fn generate_all(
     let arch_systems_config: IndexMap<String, SystemDefault> =
         load_yaml_or_empty(gen_defaults_arch_path);
 
-    // Generate es_systems.cfg
-    eprintln!("generating the {} file...", es_systems_path.display());
-    let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
-    generate_systems::write_file(&systems_xml, es_systems_path);
-
-    // Generate es_features.cfg
     let features: IndexMap<String, EmulatorFeatures> = load_yaml_ordered(features_path);
-    let mut to_translate_on_arch: IndexMap<String, Vec<generate_features::TranslationComment>> =
-        IndexMap::new();
-    let features_xml = generate_features::generate(&features, arch, &mut to_translate_on_arch);
-    generate_features::write_file(&features_xml, es_features_path);
 
-    // Find all translations (arch-independent)
+    match format {
+        OutputFormat::Xml => {
+            // Generate es_systems.cfg (XML)
+            eprintln!("generating the {} file...", es_systems_path.display());
+            let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
+            generate_systems::write_file(&systems_xml, es_systems_path);
+
+            // Generate es_features.cfg (XML)
+            let mut to_translate_on_arch: IndexMap<String, Vec<generate_features::TranslationComment>> =
+                IndexMap::new();
+            let features_xml = generate_features::generate(&features, arch, &mut to_translate_on_arch);
+            generate_features::write_file(&features_xml, es_features_path);
+        }
+        OutputFormat::Json => {
+            // Generate es_systems.json
+            eprintln!("generating the {} file...", es_systems_path.display());
+            let systems_json = generate_json::generate_systems(&systems, &config, &systems_config, &arch_systems_config);
+            generate_json::write_json(&systems_json, es_systems_path);
+
+            // Generate es_features.json
+            let features_json = generate_json::generate_features(&features, arch);
+            generate_json::write_json(&features_json, es_features_path);
+        }
+    }
+
+    // Find all translations (arch-independent) — always generate regardless of format
     let mut to_translate = translations::find_all(&features);
 
     // Remove blacklisted words
@@ -139,7 +191,7 @@ fn generate_all(
 }
 
 /// On-device regeneration mode.
-fn regenerate_mode(args: &[String]) {
+fn regenerate_mode(args: &[String], format: OutputFormat) {
     let mut data_dir = PathBuf::from("/usr/share/es-system");
     let mut output_dir = PathBuf::from("/usr/share/emulationstation");
     let mut configgen_dir = PathBuf::from("/usr/share/reglinux/configgen");
@@ -174,25 +226,43 @@ fn regenerate_mode(args: &[String]) {
 
     let yml_path = data_dir.join("es_systems.yml");
     let features_path = data_dir.join("es_features.yml");
-    let es_systems_out = output_dir.join("es_systems.cfg");
-    let es_features_out = output_dir.join("es_features.cfg");
     let defaults_global = configgen_dir.join("configgen-defaults.yml");
     let defaults_arch = configgen_dir.join("configgen-defaults-arch.yml");
+
+    let (sys_ext, feat_ext) = match format {
+        OutputFormat::Xml => ("es_systems.cfg", "es_features.cfg"),
+        OutputFormat::Json => ("es_systems.json", "es_features.json"),
+    };
+    let es_systems_out = output_dir.join(sys_ext);
+    let es_features_out = output_dir.join(feat_ext);
 
     let systems: IndexMap<String, System> = load_yaml(&yml_path);
     let config = config::load_config(&config_path);
     let systems_config: IndexMap<String, SystemDefault> = load_yaml(&defaults_global);
     let arch_systems_config: IndexMap<String, SystemDefault> = load_yaml_or_empty(&defaults_arch);
 
-    eprintln!("regenerating {} ...", es_systems_out.display());
-    let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
-    generate_systems::write_file(&systems_xml, &es_systems_out);
-
     let features: IndexMap<String, EmulatorFeatures> = load_yaml_ordered(&features_path);
-    let mut to_translate: IndexMap<String, Vec<generate_features::TranslationComment>> =
-        IndexMap::new();
-    let features_xml = generate_features::generate(&features, &arch, &mut to_translate);
-    generate_features::write_file(&features_xml, &es_features_out);
+
+    match format {
+        OutputFormat::Xml => {
+            eprintln!("regenerating {} ...", es_systems_out.display());
+            let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
+            generate_systems::write_file(&systems_xml, &es_systems_out);
+
+            let mut to_translate: IndexMap<String, Vec<generate_features::TranslationComment>> =
+                IndexMap::new();
+            let features_xml = generate_features::generate(&features, &arch, &mut to_translate);
+            generate_features::write_file(&features_xml, &es_features_out);
+        }
+        OutputFormat::Json => {
+            eprintln!("regenerating {} ...", es_systems_out.display());
+            let systems_json = generate_json::generate_systems(&systems, &config, &systems_config, &arch_systems_config);
+            generate_json::write_json(&systems_json, &es_systems_out);
+
+            let features_json = generate_json::generate_features(&features, &arch);
+            generate_json::write_json(&features_json, &es_features_out);
+        }
+    }
 
     eprintln!("done.");
 }
