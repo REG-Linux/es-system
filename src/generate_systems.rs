@@ -19,7 +19,7 @@ pub fn generate(
     arch_systems_config: &IndexMap<String, SystemDefault>,
 ) -> String {
     let mut xml = String::new();
-    xml.push_str("<?xml version=\"1.0\"?>\n");
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
     xml.push_str("<systemList>\n");
 
     let mut sorted_names: Vec<&String> = systems.keys().collect();
