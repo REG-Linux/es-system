@@ -134,26 +134,20 @@ fn generate_all(
 
     let features: IndexMap<String, EmulatorFeatures> = load_yaml_ordered(features_path);
 
+    // Systems: always XML (rs_systems.cfg) — REG-Station consumes XML only.
+    eprintln!("generating the {} file...", es_systems_path.display());
+    let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
+    generate_systems::write_file(&systems_xml, es_systems_path);
+
+    // Features: JSON (new default for REG-Station) or XML (legacy).
     match format {
         OutputFormat::Xml => {
-            // Generate es_systems.cfg (XML)
-            eprintln!("generating the {} file...", es_systems_path.display());
-            let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
-            generate_systems::write_file(&systems_xml, es_systems_path);
-
-            // Generate es_features.cfg (XML)
             let mut to_translate_on_arch: IndexMap<String, Vec<generate_features::TranslationComment>> =
                 IndexMap::new();
             let features_xml = generate_features::generate(&features, arch, &mut to_translate_on_arch);
             generate_features::write_file(&features_xml, es_features_path);
         }
         OutputFormat::Json => {
-            // Generate es_systems.json
-            eprintln!("generating the {} file...", es_systems_path.display());
-            let systems_json = generate_json::generate_systems(&systems, &config, &systems_config, &arch_systems_config);
-            generate_json::write_json(&systems_json, es_systems_path);
-
-            // Generate es_features.json
             let features_json = generate_json::generate_features(&features, arch);
             generate_json::write_json(&features_json, es_features_path);
         }
@@ -229,11 +223,12 @@ fn regenerate_mode(args: &[String], format: OutputFormat) {
     let defaults_global = configgen_dir.join("configgen-defaults.yml");
     let defaults_arch = configgen_dir.join("configgen-defaults-arch.yml");
 
-    let (sys_ext, feat_ext) = match format {
-        OutputFormat::Xml => ("es_systems.cfg", "es_features.cfg"),
-        OutputFormat::Json => ("es_systems.json", "es_features.json"),
+    // Systems file is always XML; only features extension changes with format.
+    let feat_ext = match format {
+        OutputFormat::Xml => "es_features.cfg",
+        OutputFormat::Json => "es_features.json",
     };
-    let es_systems_out = output_dir.join(sys_ext);
+    let es_systems_out = output_dir.join("es_systems.cfg");
     let es_features_out = output_dir.join(feat_ext);
 
     let systems: IndexMap<String, System> = load_yaml(&yml_path);
@@ -243,22 +238,20 @@ fn regenerate_mode(args: &[String], format: OutputFormat) {
 
     let features: IndexMap<String, EmulatorFeatures> = load_yaml_ordered(&features_path);
 
+    // Systems: always XML (rs_systems.cfg) — REG-Station consumes XML only.
+    eprintln!("regenerating {} ...", es_systems_out.display());
+    let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
+    generate_systems::write_file(&systems_xml, &es_systems_out);
+
+    // Features: JSON (new default for REG-Station) or XML (legacy).
     match format {
         OutputFormat::Xml => {
-            eprintln!("regenerating {} ...", es_systems_out.display());
-            let systems_xml = generate_systems::generate(&systems, &config, &systems_config, &arch_systems_config);
-            generate_systems::write_file(&systems_xml, &es_systems_out);
-
             let mut to_translate: IndexMap<String, Vec<generate_features::TranslationComment>> =
                 IndexMap::new();
             let features_xml = generate_features::generate(&features, &arch, &mut to_translate);
             generate_features::write_file(&features_xml, &es_features_out);
         }
         OutputFormat::Json => {
-            eprintln!("regenerating {} ...", es_systems_out.display());
-            let systems_json = generate_json::generate_systems(&systems, &config, &systems_config, &arch_systems_config);
-            generate_json::write_json(&systems_json, &es_systems_out);
-
             let features_json = generate_json::generate_features(&features, &arch);
             generate_json::write_json(&features_json, &es_features_out);
         }

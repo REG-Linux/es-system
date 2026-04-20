@@ -3,19 +3,23 @@ use std::fs;
 use std::path::Path;
 
 use indexmap::IndexMap;
-use serde_json::{json, Value as JsonValue, Map};
+use serde_json::{json, Map, Value as JsonValue};
 
 use crate::models::*;
 use crate::requirements;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// es_systems.json
+// es_systems.json  (kept for possible future use; REG-Station currently only
+// consumes rs_systems.cfg XML, so main.rs does not invoke this path.)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 const DEFAULT_PARENTPATH: &str = "/userdata/roms";
+#[allow(dead_code)]
 const DEFAULT_COMMAND: &str = "emulatorlauncher %CONTROLLERSCONFIG% -system %SYSTEM% -rom %ROM% -gameinfoxml %GAMEINFOXML% -systemname %SYSTEMNAME%";
 
 /// Generate es_systems as a JSON value.
+#[allow(dead_code)]
 pub fn generate_systems(
     systems: &IndexMap<String, System>,
     config: &HashSet<String>,
@@ -50,6 +54,7 @@ pub fn generate_systems(
     json!({ "systemList": system_list })
 }
 
+#[allow(dead_code)]
 fn gen_system_json(
     name: &str,
     data: &System,
@@ -69,7 +74,7 @@ fn gen_system_json(
     let command = data.command.as_deref().unwrap_or(DEFAULT_COMMAND);
     let theme = data.theme.as_deref().unwrap_or(name);
 
-    let mut sys = serde_json::Map::new();
+    let mut sys = Map::new();
     sys.insert("name".into(), json!(name));
     sys.insert("fullname".into(), json!(&data.name));
     sys.insert("manufacturer".into(), json!(&data.manufacturer));
@@ -97,6 +102,7 @@ fn gen_system_json(
     Some(JsonValue::Object(sys))
 }
 
+#[allow(dead_code)]
 fn list_emulators_json(
     data: &System,
     config: &HashSet<String>,
@@ -121,7 +127,7 @@ fn list_emulators_json(
                 let is_default = default_emulator.map_or(false, |e| e == emulator)
                     && default_core.map_or(false, |c| c == core);
 
-                let mut core_obj = serde_json::Map::new();
+                let mut core_obj = Map::new();
                 core_obj.insert("name".into(), json!(core));
                 if is_default {
                     core_obj.insert("default".into(), json!(true));
@@ -153,6 +159,7 @@ fn list_emulators_json(
     }
 }
 
+#[allow(dead_code)]
 fn system_path(name: &str, data: &System) -> String {
     match &data.path {
         Some(p) if p.starts_with('/') => p.clone(),
@@ -161,6 +168,7 @@ fn system_path(name: &str, data: &System) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn system_platform(name: &str, data: &System) -> String {
     match &data.platform {
         Some(p) => p.clone(),
@@ -168,6 +176,7 @@ fn system_platform(name: &str, data: &System) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn list_extensions_vec(data: &System) -> Vec<String> {
     data.extensions
         .iter()
@@ -176,140 +185,284 @@ fn list_extensions_vec(data: &System) -> Vec<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// es_features.json
+// es_features.json — schema consumed by REG-Station (CustomFeatures.cpp)
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// Matches the shape produced by REG-Station's legacy
+// tools/convert_features_xml_to_json.py so the converter can be retired.
+//
+// Root:
+//   {
+//     "sharedFeatures": { "customFeatures": [<def>, ...] },      // defs only
+//     "globalFeatures": {
+//        "sharedFeatures": [<ref>, ...],                         // refs
+//        "customFeatures": [<def>, ...],                         // defs
+//     },
+//     "emulators": [ <emulator> ],
+//   }
+//
+// <emulator> / <core> / <system>:
+//   { name, features?, sharedFeatures?, customFeatures?, cores?, systems? }
+//   - `features`: comma-separated string, omitted when empty
+//   - `cores` only for emulators; `systems` for emulators and cores
+//
+// <def>:
+//   { name=prompt, description?, submenu?, preset?, preset-parameters?,
+//     group?, order? (int if numeric, else string), value=key,
+//     choices? [ { name, value? } ] }
+//
+// <ref>:
+//   { value: shared_name }   — (other attributes unused by current emitter)
 
-/// Generate es_features as a JSON value.
 pub fn generate_features(
     features: &IndexMap<String, EmulatorFeatures>,
     arch: &str,
 ) -> JsonValue {
-    let mut out = Vec::new();
+    let mut root = Map::new();
 
-    for (emulator, emu_data) in features {
-        let mut emu_obj = Map::new();
-
-        // Tag type
-        if emulator == "global" {
-            emu_obj.insert("type".into(), json!("globalFeatures"));
-        } else if emulator == "shared" {
-            emu_obj.insert("type".into(), json!("sharedFeatures"));
-        } else {
-            emu_obj.insert("type".into(), json!("emulator"));
-            emu_obj.insert("name".into(), json!(emulator));
+    // Top-level <sharedFeatures>: only definitions (from features["shared"].cfeatures).
+    if let Some(shared_sec) = features.get("shared") {
+        let defs = collect_cfeatures(&shared_sec.cfeatures, arch);
+        if !defs.is_empty() {
+            let mut obj = Map::new();
+            obj.insert("customFeatures".into(), JsonValue::Array(defs));
+            root.insert("sharedFeatures".into(), JsonValue::Object(obj));
         }
-
-        if !emu_data.features.is_empty() {
-            emu_obj.insert("features".into(), json!(&emu_data.features));
-        }
-
-        // Cores
-        if !emu_data.cores.is_empty() {
-            let mut cores_out = Vec::new();
-            for (core_name, core_data) in &emu_data.cores {
-                let mut core_obj = Map::new();
-                core_obj.insert("name".into(), json!(core_name));
-                if !core_data.features.is_empty() {
-                    core_obj.insert("features".into(), json!(&core_data.features));
-                }
-                if !core_data.shared.is_empty() {
-                    core_obj.insert("shared".into(), json!(&core_data.shared));
-                }
-                if !core_data.cfeatures.is_empty() {
-                    core_obj.insert("cfeatures".into(), cfeatures_json(&core_data.cfeatures, arch));
-                }
-                if !core_data.systems.is_empty() {
-                    core_obj.insert("systems".into(), systems_features_json(&core_data.systems, arch));
-                }
-                cores_out.push(JsonValue::Object(core_obj));
-            }
-            emu_obj.insert("cores".into(), json!(cores_out));
-        }
-
-        // Systems at emulator level
-        if !emu_data.systems.is_empty() {
-            emu_obj.insert("systems".into(), systems_features_json(&emu_data.systems, arch));
-        }
-
-        // Shared at emulator level
-        if !emu_data.shared.is_empty() {
-            emu_obj.insert("shared".into(), json!(&emu_data.shared));
-        }
-
-        // Cfeatures at emulator level
-        if !emu_data.cfeatures.is_empty() {
-            emu_obj.insert("cfeatures".into(), cfeatures_json(&emu_data.cfeatures, arch));
-        }
-
-        out.push(JsonValue::Object(emu_obj));
     }
 
-    json!({ "features": out })
+    // Top-level <globalFeatures>: shared refs + definitions.
+    if let Some(global_sec) = features.get("global") {
+        let mut obj = Map::new();
+        let refs = collect_shared_refs(&global_sec.shared, arch, features);
+        if !refs.is_empty() {
+            obj.insert("sharedFeatures".into(), JsonValue::Array(refs));
+        }
+        let defs = collect_cfeatures(&global_sec.cfeatures, arch);
+        if !defs.is_empty() {
+            obj.insert("customFeatures".into(), JsonValue::Array(defs));
+        }
+        if !obj.is_empty() {
+            root.insert("globalFeatures".into(), JsonValue::Object(obj));
+        }
+    }
+
+    // <emulators>: everything except the reserved "shared" / "global" keys.
+    let mut emulators_out = Vec::new();
+    for (emu_name, emu_data) in features {
+        if emu_name == "global" || emu_name == "shared" {
+            continue;
+        }
+        emulators_out.push(emulator_to_json(emu_name, emu_data, arch, features));
+    }
+    if !emulators_out.is_empty() {
+        root.insert("emulators".into(), JsonValue::Array(emulators_out));
+    }
+
+    JsonValue::Object(root)
 }
 
-fn systems_features_json(
+fn emulator_to_json(
+    name: &str,
+    data: &EmulatorFeatures,
+    arch: &str,
+    all_features: &IndexMap<String, EmulatorFeatures>,
+) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert("name".into(), json!(name));
+
+    if let Some(csv) = features_csv(&data.features) {
+        obj.insert("features".into(), json!(csv));
+    }
+
+    let refs = collect_shared_refs(&data.shared, arch, all_features);
+    if !refs.is_empty() {
+        obj.insert("sharedFeatures".into(), JsonValue::Array(refs));
+    }
+
+    let defs = collect_cfeatures(&data.cfeatures, arch);
+    if !defs.is_empty() {
+        obj.insert("customFeatures".into(), JsonValue::Array(defs));
+    }
+
+    if !data.cores.is_empty() {
+        let mut cores_out = Vec::new();
+        for (core_name, core_data) in &data.cores {
+            cores_out.push(core_to_json(core_name, core_data, arch, all_features));
+        }
+        obj.insert("cores".into(), JsonValue::Array(cores_out));
+    }
+
+    let sys_out = collect_systems(&data.systems, arch, all_features);
+    if !sys_out.is_empty() {
+        obj.insert("systems".into(), JsonValue::Array(sys_out));
+    }
+
+    JsonValue::Object(obj)
+}
+
+fn core_to_json(
+    name: &str,
+    data: &CoreFeatures,
+    arch: &str,
+    all_features: &IndexMap<String, EmulatorFeatures>,
+) -> JsonValue {
+    let mut obj = Map::new();
+    obj.insert("name".into(), json!(name));
+
+    if let Some(csv) = features_csv(&data.features) {
+        obj.insert("features".into(), json!(csv));
+    }
+
+    let refs = collect_shared_refs(&data.shared, arch, all_features);
+    if !refs.is_empty() {
+        obj.insert("sharedFeatures".into(), JsonValue::Array(refs));
+    }
+
+    let defs = collect_cfeatures(&data.cfeatures, arch);
+    if !defs.is_empty() {
+        obj.insert("customFeatures".into(), JsonValue::Array(defs));
+    }
+
+    let sys_out = collect_systems(&data.systems, arch, all_features);
+    if !sys_out.is_empty() {
+        obj.insert("systems".into(), JsonValue::Array(sys_out));
+    }
+
+    JsonValue::Object(obj)
+}
+
+fn collect_systems(
     systems: &IndexMap<String, SystemFeatures>,
     arch: &str,
-) -> JsonValue {
+    all_features: &IndexMap<String, EmulatorFeatures>,
+) -> Vec<JsonValue> {
     let mut out = Vec::new();
     for (sys_name, sys_data) in systems {
-        let mut sys_obj = Map::new();
-        sys_obj.insert("name".into(), json!(sys_name));
-        if !sys_data.features.is_empty() {
-            sys_obj.insert("features".into(), json!(&sys_data.features));
+        let mut obj = Map::new();
+        obj.insert("name".into(), json!(sys_name));
+
+        if let Some(csv) = features_csv(&sys_data.features) {
+            obj.insert("features".into(), json!(csv));
         }
-        if !sys_data.shared.is_empty() {
-            sys_obj.insert("shared".into(), json!(&sys_data.shared));
+
+        let refs = collect_shared_refs(&sys_data.shared, arch, all_features);
+        if !refs.is_empty() {
+            obj.insert("sharedFeatures".into(), JsonValue::Array(refs));
         }
-        if !sys_data.cfeatures.is_empty() {
-            sys_obj.insert("cfeatures".into(), cfeatures_json(&sys_data.cfeatures, arch));
+
+        let defs = collect_cfeatures(&sys_data.cfeatures, arch);
+        if !defs.is_empty() {
+            obj.insert("customFeatures".into(), JsonValue::Array(defs));
         }
-        out.push(JsonValue::Object(sys_obj));
+
+        out.push(JsonValue::Object(obj));
     }
-    json!(out)
+    out
 }
 
-fn cfeatures_json(
+fn features_csv(list: &[String]) -> Option<String> {
+    if list.is_empty() {
+        None
+    } else {
+        Some(list.join(", "))
+    }
+}
+
+fn collect_shared_refs(
+    shared_list: &[String],
+    arch: &str,
+    all_features: &IndexMap<String, EmulatorFeatures>,
+) -> Vec<JsonValue> {
+    let mut out = Vec::new();
+    let shared_section = match all_features.get("shared") {
+        Some(s) => s,
+        None => return out,
+    };
+    for shared_name in shared_list {
+        if let Some(feature) = shared_section.cfeatures.get(shared_name) {
+            if requirements::arch_valid(arch, feature) {
+                out.push(json!({ "value": shared_name }));
+            } else {
+                eprintln!("skipping shared {}", shared_name);
+            }
+        }
+    }
+    out
+}
+
+fn collect_cfeatures(
     cfeatures: &IndexMap<String, CustomFeature>,
     arch: &str,
-) -> JsonValue {
+) -> Vec<JsonValue> {
     let mut out = Vec::new();
     for (cf_name, cf) in cfeatures {
         if !requirements::arch_valid(arch, cf) {
             continue;
         }
-        let mut obj = Map::new();
-        obj.insert("value".into(), json!(cf_name));
-        obj.insert("name".into(), json!(&cf.prompt));
-        if let Some(desc) = &cf.description {
-            if !desc.is_empty() {
-                obj.insert("description".into(), json!(desc));
-            }
-        }
-        if let Some(group) = &cf.group {
-            obj.insert("group".into(), json!(group));
-        }
-        if let Some(submenu) = &cf.submenu {
-            obj.insert("submenu".into(), json!(submenu));
-        }
-        if let Some(order) = &cf.order {
-            obj.insert("order".into(), json!(yaml_value_to_string(order)));
-        }
-        if let Some(preset) = &cf.preset {
-            obj.insert("preset".into(), json!(preset));
-        }
-        if let Some(params) = &cf.preset_parameters {
-            obj.insert("preset_parameters".into(), json!(params));
-        }
-        if !cf.choices.is_empty() && cf.preset.is_none() {
-            let choices: Vec<JsonValue> = cf.choices.iter().map(|(k, v)| {
-                json!({ "name": k, "value": yaml_value_to_string(v) })
-            }).collect();
-            obj.insert("choices".into(), json!(choices));
-        }
-        out.push(JsonValue::Object(obj));
+        out.push(feature_to_json(cf_name, cf));
     }
-    json!(out)
+    out
+}
+
+fn feature_to_json(key: &str, cf: &CustomFeature) -> JsonValue {
+    let mut obj = Map::new();
+    // Match convert_features_xml_to_json.py parse_feature key order:
+    // name first, then (description, submenu, preset, preset-parameters, group, order, value),
+    // then choices.
+    obj.insert("name".into(), json!(&cf.prompt));
+
+    if let Some(v) = non_empty(&cf.description) {
+        obj.insert("description".into(), json!(v));
+    }
+    if let Some(v) = non_empty(&cf.submenu) {
+        obj.insert("submenu".into(), json!(v));
+    }
+    if let Some(v) = non_empty(&cf.preset) {
+        obj.insert("preset".into(), json!(v));
+    }
+    if let Some(v) = non_empty(&cf.preset_parameters) {
+        obj.insert("preset-parameters".into(), json!(v));
+    }
+    if let Some(v) = non_empty(&cf.group) {
+        obj.insert("group".into(), json!(v));
+    }
+    if let Some(order) = &cf.order {
+        let s = yaml_value_to_string(order);
+        if !s.is_empty() {
+            // Python converter: int(value) if possible, else keep the string.
+            let order_val: JsonValue = match s.parse::<i64>() {
+                Ok(n) => json!(n),
+                Err(_) => json!(s),
+            };
+            obj.insert("order".into(), order_val);
+        }
+    }
+    if !key.is_empty() {
+        obj.insert("value".into(), json!(key));
+    }
+
+    // Choices are only emitted when there is no preset (matches the XML emitter).
+    if cf.preset.is_none() && !cf.choices.is_empty() {
+        let mut choices = Vec::new();
+        for (choice_name, choice_value) in &cf.choices {
+            let mut c = Map::new();
+            c.insert("name".into(), json!(choice_name));
+            let v = yaml_value_to_string(choice_value);
+            if !v.is_empty() {
+                c.insert("value".into(), json!(v));
+            }
+            choices.push(JsonValue::Object(c));
+        }
+        if !choices.is_empty() {
+            obj.insert("choices".into(), JsonValue::Array(choices));
+        }
+    }
+
+    JsonValue::Object(obj)
+}
+
+fn non_empty(opt: &Option<String>) -> Option<&str> {
+    opt.as_deref().filter(|s| !s.is_empty())
 }
 
 /// Write JSON to a file.
