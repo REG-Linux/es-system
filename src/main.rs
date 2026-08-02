@@ -23,8 +23,11 @@ enum OutputFormat {
     Json,
 }
 
-fn parse_format(args: &[String]) -> (OutputFormat, Vec<String>) {
-    let mut format = OutputFormat::Xml;
+/// Returns `None` when `--format` was not given, so each mode can pick its own
+/// default: XML for the legacy build-time invocation, JSON for `regenerate`
+/// (the only features format REG-Station reads).
+fn parse_format(args: &[String]) -> (Option<OutputFormat>, Vec<String>) {
+    let mut format = None;
     let mut filtered = Vec::new();
     let mut skip_next = false;
 
@@ -36,8 +39,8 @@ fn parse_format(args: &[String]) -> (OutputFormat, Vec<String>) {
         if arg == "--format" {
             if let Some(val) = args.get(i + 1) {
                 match val.as_str() {
-                    "json" => format = OutputFormat::Json,
-                    "xml" => format = OutputFormat::Xml,
+                    "json" => format = Some(OutputFormat::Json),
+                    "xml" => format = Some(OutputFormat::Xml),
                     _ => {
                         eprintln!("Unknown format: {} (expected: xml, json)", val);
                         process::exit(1);
@@ -58,7 +61,7 @@ fn main() {
     let (format, args) = parse_format(&raw_args);
 
     if args.len() > 1 && args[1] == "regenerate" {
-        regenerate_mode(&args[2..], format);
+        regenerate_mode(&args[2..], format.unwrap_or(OutputFormat::Json));
         return;
     }
 
@@ -69,7 +72,8 @@ fn main() {
         eprintln!("         <es_systems> <es_features> <gen_defaults_global> \\");
         eprintln!("         <gen_defaults_arch> <romsdirsource> <romsdirtarget> <arch>");
         eprintln!();
-        eprintln!("Or: {} [--format xml|json] regenerate [--data-dir DIR] [--output-dir DIR] [--arch ARCH]", args[0]);
+        eprintln!("Or: {} regenerate [--user-dir DIR] [--data-dir DIR] [--output-dir DIR] \\", args[0]);
+        eprintln!("         [--launcher-dir DIR] [--config FILE] [--arch ARCH] [--format xml|json]");
         process::exit(1);
     }
 
@@ -103,7 +107,7 @@ fn main() {
         &roms_dir_source,
         &roms_dir_target,
         arch,
-        format,
+        format.unwrap_or(OutputFormat::Xml),
     );
 }
 
@@ -184,52 +188,130 @@ fn generate_all(
     }
 }
 
-/// On-device regeneration mode.
+/// Resolve one input file: the user's copy wins, the image's is the fallback.
+fn resolve_input(user_dir: &Path, data_dir: &Path, name: &str) -> Option<PathBuf> {
+    let user = user_dir.join(name);
+    if user.is_file() {
+        return Some(user);
+    }
+    let system = data_dir.join(name);
+    if system.is_file() {
+        return Some(system);
+    }
+    None
+}
+
+/// On-device regeneration mode. Manual only — nothing on the device invokes
+/// this, at boot or otherwise.
+///
+/// Every input resolves `--user-dir` first, `--data-dir` second, so a stock
+/// device regenerates byte-identically to its own build and the user overrides
+/// only the file they actually edited. `--data-dir` holds the image's copies of
+/// `es_systems.yml` / `es_features.yml` plus the two build facts a device cannot
+/// reconstruct: `installed-packages.conf` (which BR2_PACKAGE_* symbols this
+/// image was built with, i.e. the `requireAnyOf` gating) and `arch.conf`.
+///
+/// Output goes to /userdata, which every consumer already prefers over the
+/// image copy: REG-Station's `SystemData::getConfigPath()` and
+/// `CustomFeatures::loadFeatures()`, and regmsgd's `library::systems`.
 fn regenerate_mode(args: &[String], format: OutputFormat) {
+    let mut user_dir = PathBuf::from("/userdata/system/configs/es-system");
     let mut data_dir = PathBuf::from("/usr/share/es-system");
-    let mut output_dir = PathBuf::from("/usr/share/emulationstation");
-    let mut configgen_dir = PathBuf::from("/usr/share/reglinux/configgen");
+    let mut output_dir = PathBuf::from("/userdata/system/configs/regstation");
+    let mut launcher_dir = PathBuf::from("/usr/share/regmsg/launcher");
     let mut arch = String::new();
-    let mut config_path = PathBuf::from("/usr/share/es-system/installed-packages.conf");
+    let mut config_override: Option<PathBuf> = None;
+
+    let need_value = |i: usize| {
+        if i >= args.len() {
+            eprintln!("Missing value for {}", args[i - 1]);
+            process::exit(1);
+        }
+    };
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--data-dir" => { i += 1; data_dir = PathBuf::from(&args[i]); }
-            "--output-dir" => { i += 1; output_dir = PathBuf::from(&args[i]); }
-            "--configgen-dir" => { i += 1; configgen_dir = PathBuf::from(&args[i]); }
-            "--arch" => { i += 1; arch = args[i].clone(); }
-            "--config" => { i += 1; config_path = PathBuf::from(&args[i]); }
+            "--user-dir" => { i += 1; need_value(i); user_dir = PathBuf::from(&args[i]); }
+            "--data-dir" => { i += 1; need_value(i); data_dir = PathBuf::from(&args[i]); }
+            "--output-dir" => { i += 1; need_value(i); output_dir = PathBuf::from(&args[i]); }
+            "--launcher-dir" => { i += 1; need_value(i); launcher_dir = PathBuf::from(&args[i]); }
+            "--arch" => { i += 1; need_value(i); arch = args[i].clone(); }
+            "--config" => { i += 1; need_value(i); config_override = Some(PathBuf::from(&args[i])); }
             _ => { eprintln!("Unknown option: {}", args[i]); process::exit(1); }
         }
         i += 1;
     }
 
+    // Report a missing input plainly rather than letting load_yaml panic on it.
+    let mut missing = Vec::new();
+    let yml_path = resolve_input(&user_dir, &data_dir, "es_systems.yml");
+    let features_path = resolve_input(&user_dir, &data_dir, "es_features.yml");
+    if yml_path.is_none() {
+        missing.push("es_systems.yml");
+    }
+    if features_path.is_none() {
+        missing.push("es_features.yml");
+    }
+    if !missing.is_empty() {
+        eprintln!("Missing input: {}", missing.join(", "));
+        eprintln!("Looked in {} then {}", user_dir.display(), data_dir.display());
+        process::exit(1);
+    }
+    let yml_path = yml_path.unwrap();
+    let features_path = features_path.unwrap();
+
+    // Which BR2_PACKAGE_* symbols this image was built with. Without it every
+    // `requireAnyOf` gate fails closed and the result is an empty system list,
+    // so refuse rather than write that out.
+    let config_path = match config_override
+        .or_else(|| resolve_input(&user_dir, &data_dir, "installed-packages.conf"))
+    {
+        Some(p) => p,
+        None => {
+            eprintln!("Missing installed-packages.conf in {} or {}", user_dir.display(), data_dir.display());
+            eprintln!("Without it no emulator passes its requireAnyOf gate.");
+            process::exit(1);
+        }
+    };
+
     // Auto-detect arch from arch.conf if not specified
     if arch.is_empty() {
-        let arch_conf = data_dir.join("arch.conf");
-        arch = fs::read_to_string(&arch_conf)
+        arch = resolve_input(&user_dir, &data_dir, "arch.conf")
+            .and_then(|p| fs::read_to_string(p).ok())
             .unwrap_or_default()
             .trim()
             .to_string();
         if arch.is_empty() {
-            eprintln!("No --arch specified and {} not found", arch_conf.display());
+            eprintln!("No --arch given and no usable arch.conf in {} or {}", user_dir.display(), data_dir.display());
             process::exit(1);
         }
     }
 
-    let yml_path = data_dir.join("es_systems.yml");
-    let features_path = data_dir.join("es_features.yml");
-    let defaults_global = configgen_dir.join("configgen-defaults.yml");
-    let defaults_arch = configgen_dir.join("configgen-defaults-arch.yml");
+    // Shared with regmsgd, which reads them from this same path
+    // (`launcher::system_map`) — so they are read from the image, not shadowed
+    // per-consumer, or the frontend and the launcher would disagree.
+    let defaults_global = launcher_dir.join("launcher-defaults.yml");
+    let defaults_arch = launcher_dir.join("launcher-defaults-arch.yml");
 
-    // Systems file is always XML; only features extension changes with format.
-    let feat_ext = match format {
-        OutputFormat::Xml => "es_features.cfg",
-        OutputFormat::Json => "es_features.json",
+    // Systems file is always XML; only the features extension tracks the format.
+    let feat_name = match format {
+        OutputFormat::Xml => "rs_features.cfg",
+        OutputFormat::Json => "rs_features.json",
     };
-    let es_systems_out = output_dir.join("es_systems.cfg");
-    let es_features_out = output_dir.join(feat_ext);
+    let es_systems_out = output_dir.join("rs_systems.cfg");
+    let es_features_out = output_dir.join(feat_name);
+
+    if let Err(e) = fs::create_dir_all(&output_dir) {
+        eprintln!("Cannot create {}: {}", output_dir.display(), e);
+        process::exit(1);
+    }
+
+    eprintln!("systems:   {}", yml_path.display());
+    eprintln!("features:  {}", features_path.display());
+    eprintln!("packages:  {}", config_path.display());
+    eprintln!("defaults:  {}", defaults_global.display());
+    eprintln!("arch:      {}", arch);
 
     let systems: IndexMap<String, System> = load_yaml(&yml_path);
     let config = config::load_config(&config_path);
@@ -244,6 +326,7 @@ fn regenerate_mode(args: &[String], format: OutputFormat) {
     generate_systems::write_file(&systems_xml, &es_systems_out);
 
     // Features: JSON (new default for REG-Station) or XML (legacy).
+    eprintln!("regenerating {} ...", es_features_out.display());
     match format {
         OutputFormat::Xml => {
             let mut to_translate: IndexMap<String, Vec<generate_features::TranslationComment>> =
@@ -257,7 +340,7 @@ fn regenerate_mode(args: &[String], format: OutputFormat) {
         }
     }
 
-    eprintln!("done.");
+    eprintln!("done. Restart the frontend to pick them up.");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
